@@ -291,6 +291,7 @@ fn main() -> Result<ExitCode> {
         }
     }
 
+    let mut enable_hidpipe = false;
     if let Ok(run_path) = env::var("XDG_RUNTIME_DIR") {
         let pulse_path = Path::new(&run_path).join("pulse/native");
         if pulse_path.exists() {
@@ -309,19 +310,22 @@ fn main() -> Result<ExitCode> {
         }
 
         let hidpipe_path = Path::new(&run_path).join("hidpipe");
-        spawn_hidpipe_server(hidpipe_path.clone()).context("Failed to spawn hidpipe thread")?;
-        let hidpipe_path = CString::new(
-            hidpipe_path
-                .to_str()
-                .expect("hidpipe_path should not contain invalid UTF-8"),
-        )
-        .context("Failed to process `hidpipe` path as it contains NUL character")?;
+        enable_hidpipe =
+            spawn_hidpipe_server(hidpipe_path.clone()).context("Failed to spawn hidpipe thread")?;
+        if enable_hidpipe {
+            let hidpipe_path = CString::new(
+                hidpipe_path
+                    .to_str()
+                    .expect("hidpipe_path should not contain invalid UTF-8"),
+            )
+            .context("Failed to process `hidpipe` path as it contains NUL character")?;
 
-        // SAFETY: `hidpipe_path` is a pointer to a `CString` with long enough lifetime.
-        let err = unsafe { krun_add_vsock_port(ctx_id, HIDPIPE_SOCKET, hidpipe_path.as_ptr()) };
-        if err < 0 {
-            let err = Errno::from_raw_os_error(-err);
-            return Err(err).context("Failed to configure vsock for hidpipe socket");
+            // SAFETY: `hidpipe_path` is a pointer to a `CString` with long enough lifetime.
+            let err = unsafe { krun_add_vsock_port(ctx_id, HIDPIPE_SOCKET, hidpipe_path.as_ptr()) };
+            if err < 0 {
+                let err = Errno::from_raw_os_error(-err);
+                return Err(err).context("Failed to configure vsock for hidpipe socket");
+            }
         }
 
         let socket_dir = Path::new(&run_path).join("krun/socket");
@@ -413,6 +417,7 @@ fn main() -> Result<ExitCode> {
         cwd,
         init_commands,
         user_init_commands: options.user_init_commands,
+        enable_hidpipe,
     };
     let mut muvm_config_file = NamedTempFile::new()
         .context("Failed to create a temporary file to store the muvm guest config")?;

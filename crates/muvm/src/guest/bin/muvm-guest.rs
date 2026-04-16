@@ -147,12 +147,16 @@ fn main() -> Result<ExitCode> {
         setup_x11_forwarding(run_path, &host_display)?;
     }
 
-    let uid = options.uid;
-    thread::spawn(move || {
-        if catch_unwind(|| start_hidpipe(uid)).is_err() {
-            eprintln!("hidpipe thread crashed, input device passthrough will no longer function");
-        }
-    });
+    if options.enable_hidpipe {
+        let uid = options.uid;
+        thread::spawn(move || {
+            if catch_unwind(|| start_hidpipe(uid)).is_err() {
+                eprintln!(
+                    "hidpipe thread crashed, input device passthrough will no longer function"
+                );
+            }
+        });
+    }
 
     thread::spawn(|| {
         if catch_unwind(start_pwbridge).is_err() {

@@ -280,12 +280,18 @@ where
     }
 }
 
-pub fn spawn_hidpipe_server(socket_path: PathBuf) -> anyhow::Result<()> {
+pub fn spawn_hidpipe_server(socket_path: PathBuf) -> anyhow::Result<bool> {
     let mut evdevs = EvdevContainer::new();
     let epoll = Epoll::new(EpollCreateFlags::empty()).context("Failed to create epoll object")?;
-    for dir_ent in
-        fs::read_dir("/dev/input/").context("Failed to read \"/dev/input/\" directory")?
-    {
+    let dir_entries = match fs::read_dir("/dev/input/") {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            debug!("Skipping hidpipe initialization: /dev/input is not present");
+            return Ok(false);
+        },
+        Err(err) => return Err(err).context("Failed to read \"/dev/input/\" directory"),
+    };
+    for dir_ent in dir_entries {
         let dir_ent = dir_ent.context("Failed to read directory entry")?;
         if dir_ent
             .file_type()
@@ -321,7 +327,7 @@ pub fn spawn_hidpipe_server(socket_path: PathBuf) -> anyhow::Result<()> {
         .unwrap();
 
     thread::spawn(move || run(evdevs, listen_sock, epoll));
-    Ok(())
+    Ok(true)
 }
 
 fn run(mut evdevs: EvdevContainer, listen_sock: UnixListener, epoll: Epoll) {

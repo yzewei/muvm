@@ -46,6 +46,12 @@ pub struct GuestConfiguration {
     pub cwd: PathBuf,
     pub init_commands: Vec<PathBuf>,
     pub user_init_commands: Vec<PathBuf>,
+    #[serde(default = "default_true")]
+    pub enable_hidpipe: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 pub const PULSE_SOCKET: u32 = 3333;
