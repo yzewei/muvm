@@ -7,12 +7,21 @@ use bpaf::{any, construct, long, positional, OptionParser, Parser};
 use crate::types::MiB;
 use crate::utils::launch::Emulator;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GpuMode {
-    #[default]
     Drm,
     Venus,
     Software,
+}
+
+impl Default for GpuMode {
+    fn default() -> Self {
+        if cfg!(target_arch = "loongarch64") {
+            Self::Software
+        } else {
+            Self::Drm
+        }
+    }
 }
 
 impl std::str::FromStr for GpuMode {

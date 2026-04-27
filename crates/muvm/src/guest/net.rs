@@ -1,7 +1,8 @@
 use std::fs;
 use std::io::Write;
 use std::net::{Ipv4Addr, UdpSocket};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use neli::consts::nl::NlmF;
@@ -230,10 +231,16 @@ fn wait_for_slaac(rtnl: &NlRouter) -> Result<()> {
     let mut global_seen = false;
     let mut global_wait = true;
     let mut ll_seen = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
 
     // Busy-netlink-loop until we see a link-local address, and a global unicast
     // address as long as we might expect one (see below)
     while !ll_seen || (global_wait && !global_seen) {
+        if Instant::now() >= deadline {
+            eprintln!("Timed out waiting for IPv6 SLAAC on eth0, continuing");
+            break;
+        }
+
         let ifaddrmsg = IfaddrmsgBuilder::default()
             .ifa_family(RtAddrFamily::Inet6)
             .ifa_prefixlen(0)
@@ -260,6 +267,8 @@ fn wait_for_slaac(rtnl: &NlRouter) -> Result<()> {
                 }
             }
         }
+
+        thread::sleep(Duration::from_millis(50));
     }
 
     Ok(())

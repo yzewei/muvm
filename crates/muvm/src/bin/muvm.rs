@@ -27,6 +27,7 @@ use muvm::types::MiB;
 use muvm::utils::launch::{
     GuestConfiguration, Launch, HIDPIPE_SOCKET, MUVM_GUEST_SOCKET, PULSE_SOCKET,
 };
+use nix::libc::option;
 use nix::sys::sysinfo::sysinfo;
 use nix::unistd::User;
 use rustix::io::Errno;
@@ -106,10 +107,12 @@ fn main() -> Result<ExitCode> {
     let mut env = prepare_env_vars(env).context("Failed to prepare environment variables")?;
 
     {
-        // Set the log level to "off".
-        //
+        let krun_log_level = env::var("MUVM_KRUN_LOG_LEVEL")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0);
         // SAFETY: Safe as no pointers involved.
-        let err = unsafe { krun_set_log_level(0) };
+        let err = unsafe { krun_set_log_level(krun_log_level) };
         if err < 0 {
             let err = Errno::from_raw_os_error(-err);
             return Err(err).context("Failed to configure log level");
@@ -129,7 +132,8 @@ fn main() -> Result<ExitCode> {
     };
 
     {
-        let cpu_list = if !options.cpu_list.is_empty() {
+        let user_specified_cpu_list = !options.cpu_list.is_empty();
+        let mut cpu_list = if user_specified_cpu_list {
             options.cpu_list
         } else {
             get_performance_cores()
@@ -138,6 +142,11 @@ fn main() -> Result<ExitCode> {
                 })
                 .or_else(|_err| get_fallback_cores())?
         };
+
+        if cfg!(target_arch = "loongarch64") && !user_specified_cpu_list {
+            cpu_list.truncate(1);
+        }
+
         let num_vcpus = cpu_list.iter().fold(0, |acc, cpus| acc + cpus.len()) as u8;
 
         let sysinfo = sysinfo().context("Failed to get system information")?;

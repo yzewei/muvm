@@ -111,7 +111,35 @@ mod arch {
     }
 }
 
-#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[cfg(target_arch = "loongarch64")]
+mod arch {
+    use nix::libc::{c_long, c_ulonglong, user_regs_struct};
+    pub type SyscallInstr = u32;
+    pub const SYSCALL_INSTR: SyscallInstr = 0x002b0000;
+
+    pub fn set_syscall_addr(regs: &mut user_regs_struct, syscall_addr: usize) {
+        regs.csr_era = syscall_addr as u64;
+    }
+
+    pub fn fill_syscall_args(
+        regs: &mut user_regs_struct,
+        syscall_no: c_long,
+        args: &[c_ulonglong; 6],
+    ) {
+        regs.regs[4..10].copy_from_slice(args);
+        regs.regs[11] = syscall_no as c_ulonglong;
+    }
+
+    pub fn get_syscall_result(regs: &user_regs_struct) -> c_ulonglong {
+        regs.regs[4]
+    }
+}
+
+#[cfg(not(any(
+    target_arch = "aarch64",
+    target_arch = "x86_64",
+    target_arch = "loongarch64"
+)))]
 mod arch {
     pub const SYSCALL_INSTR: u32 = 0xffffffff;
 }
@@ -525,7 +553,11 @@ impl X11ProtocolHandler {
         // Allow everything in /dev/shm (including paths with trailing '(deleted)')
         let shmem_file = if filename.starts_with(SHM_DIR) {
             File::from(memfd)
-        } else if cfg!(not(any(target_arch = "aarch64", target_arch = "x86_64"))) {
+        } else if cfg!(not(any(
+            target_arch = "aarch64",
+            target_arch = "x86_64",
+            target_arch = "loongarch64"
+        ))) {
             return Err(Errno::EOPNOTSUPP.into());
         } else {
             let (fd, shmem_path) = mkstemp(SHM_TEMPLATE)?;
@@ -698,6 +730,56 @@ impl Drop for FutexWatcherThread {
     }
 }
 
+#[cfg(target_arch = "loongarch64")]
+fn ptrace_getregs(pid: Pid) -> std::result::Result<user_regs_struct, Errno> {
+    let mut regs = mem::MaybeUninit::<user_regs_struct>::uninit();
+    let mut iov = nix::libc::iovec {
+        iov_base: regs.as_mut_ptr().cast(),
+        iov_len: mem::size_of::<user_regs_struct>(),
+    };
+
+    let ret = unsafe {
+        nix::libc::ptrace(
+            nix::libc::PTRACE_GETREGSET,
+            pid.as_raw(),
+            nix::libc::NT_PRSTATUS as usize as *mut c_void,
+            (&mut iov as *mut nix::libc::iovec).cast::<c_void>(),
+        )
+    };
+    Errno::result(ret)?;
+
+    Ok(unsafe { regs.assume_init() })
+}
+
+#[cfg(not(target_arch = "loongarch64"))]
+fn ptrace_getregs(pid: Pid) -> std::result::Result<user_regs_struct, Errno> {
+    ptrace::getregs(pid)
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn ptrace_setregs(pid: Pid, regs: user_regs_struct) -> std::result::Result<(), Errno> {
+    let mut regs = regs;
+    let mut iov = nix::libc::iovec {
+        iov_base: (&mut regs as *mut user_regs_struct).cast(),
+        iov_len: mem::size_of::<user_regs_struct>(),
+    };
+
+    let ret = unsafe {
+        nix::libc::ptrace(
+            nix::libc::PTRACE_SETREGSET,
+            pid.as_raw(),
+            nix::libc::NT_PRSTATUS as usize as *mut c_void,
+            (&mut iov as *mut nix::libc::iovec).cast::<c_void>(),
+        )
+    };
+    Errno::result(ret).map(drop)
+}
+
+#[cfg(not(target_arch = "loongarch64"))]
+fn ptrace_setregs(pid: Pid, regs: user_regs_struct) -> std::result::Result<(), Errno> {
+    ptrace::setregs(pid, regs)
+}
+
 #[allow(dead_code)]
 struct RemoteCaller {
     pid: Pid,
@@ -705,12 +787,16 @@ struct RemoteCaller {
 }
 
 impl RemoteCaller {
-    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "x86_64",
+        target_arch = "loongarch64"
+    ))]
     fn with<R, F>(pid: Pid, f: F) -> Result<R>
     where
         F: FnOnce(&RemoteCaller) -> Result<R>,
     {
-        let old_regs = ptrace::getregs(pid)?;
+        let old_regs = ptrace_getregs(pid)?;
 
         // Find the vDSO and the address of a syscall instruction within it
         let (vdso_start, _) = find_vdso(Some(pid))?;
@@ -718,9 +804,9 @@ impl RemoteCaller {
 
         let mut regs = old_regs;
         arch::set_syscall_addr(&mut regs, syscall_addr);
-        ptrace::setregs(pid, regs)?;
+        ptrace_setregs(pid, regs)?;
         let res = f(&RemoteCaller { regs, pid })?;
-        ptrace::setregs(pid, old_regs)?;
+        ptrace_setregs(pid, old_regs)?;
         Ok(res)
     }
 
@@ -777,21 +863,29 @@ impl RemoteCaller {
         .map(|x| x as i32)
     }
 
-    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "x86_64",
+        target_arch = "loongarch64"
+    ))]
     fn syscall(&self, syscall_no: c_long, args: [c_ulonglong; 6]) -> Result<c_ulonglong> {
         let mut regs = self.regs;
         arch::fill_syscall_args(&mut regs, syscall_no, &args);
-        ptrace::setregs(self.pid, regs)?;
+        ptrace_setregs(self.pid, regs)?;
         ptrace::step(self.pid, None)?;
         let evt = waitpid(self.pid, Some(WaitPidFlag::__WALL))?;
         if !matches!(evt, WaitStatus::Stopped(_, _)) {
             unimplemented!();
         }
-        regs = ptrace::getregs(self.pid)?;
+        regs = ptrace_getregs(self.pid)?;
         Ok(arch::get_syscall_result(&regs))
     }
 
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        target_arch = "x86_64",
+        target_arch = "loongarch64"
+    )))]
     fn with<R, F>(_pid: Pid, _f: F) -> Result<R>
     where
         F: FnOnce(&RemoteCaller) -> Result<R>,
@@ -799,7 +893,11 @@ impl RemoteCaller {
         Err(Errno::EOPNOTSUPP.into())
     }
 
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        target_arch = "x86_64",
+        target_arch = "loongarch64"
+    )))]
     fn syscall(&self, _syscall_no: c_long, _args: [c_ulonglong; 6]) -> Result<c_ulonglong> {
         Err(Errno::EOPNOTSUPP.into())
     }

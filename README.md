@@ -70,6 +70,187 @@ GPU acceleration is also enabled on systems supporting [DRM native context](http
 
 If [FEX-Emu](https://fex-emu.com/) is installed in your system, `muvm` will configure `binfmt_misc` inside the microVM so x86/x86_64 programs can be run transparently on it.
 
+## Building
+
+This project is a Rust workspace. `crates/krun-sys` links against `libkrun`, and the `udev` crate also requires the development files for `libudev`.
+
+On a system where `libkrun.pc` and `libudev.pc` are already visible to `pkg-config`, a normal build is enough:
+
+``` sh
+cargo build --release
+```
+
+If you want to link against a local `libkrun` build or install prefix, `crates/krun-sys` also accepts explicit overrides:
+
+- `LIBKRUN_DIR`: install prefix containing `include/` and `lib/` or `lib64/`
+- `LIBKRUN_PKGCONFIG_DIR`: directory containing `libkrun.pc`
+- `LIBKRUN_INCLUDE_DIR` and `LIBKRUN_LIB_DIR`: direct paths to headers and libraries
+
+Example using an installed local prefix:
+
+``` sh
+export LIBKRUN_DIR=/path/to/libkrun/out
+cargo build --release
+```
+
+Example using explicit directories from a local tree:
+ss
+``` sh
+export LIBKRUN_INCLUDE_DIR=/path/to/libkrun/include
+export LIBKRUN_LIB_DIR=/path/to/libkrun/lib64
+cargo build --release
+```
+
+If `libkrun` is outside the system runtime search path, you will also need to export `LD_LIBRARY_PATH` when running the built binaries:
+
+``` sh
+export LD_LIBRARY_PATH=/path/to/libkrun/lib64:${LD_LIBRARY_PATH}
+./target/release/muvm --help
+```
+
+`libudev` still needs to be provided by the system toolchain. If `cargo build` reports that `libudev.pc` is missing, install the `libudev` development package for your distribution or add its pkg-config directory to `PKG_CONFIG_PATH`.
+
+## LoongArch64 quick start
+
+This section summarizes a practical setup for running `muvm` on LoongArch64 with a local `libkrun` and `libkrunfw`.
+
+### 1) Build
+
+``` sh
+cargo build --release
+```
+
+### 2) Runtime environment
+
+Run as a normal user (not root), then export:
+
+``` sh
+export PATH=/path/to/muvm/target/release:$PATH
+export LD_LIBRARY_PATH=/path/to/libkrunfw:/path/to/libkrun/target/release:${LD_LIBRARY_PATH}
+
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/xdg-runtime-$(id -u)}
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+```
+
+Example with the local layout used during LoongArch bring-up:
+
+``` sh
+export PATH=/home/yzw/python-trans/muvm/target/release:$PATH
+export LD_LIBRARY_PATH=/home/yzw/libkrunfw:/home/yzw/python-trans/libkrun/target/release:${LD_LIBRARY_PATH}
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/xdg-runtime-$(id -u)}
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+```
+
+Also ensure:
+
+- `muvm` and `muvm-guest` are in `PATH`
+- `passt` is installed and in `PATH` (or use `--passt-socket`)
+- `/dev/kvm` is accessible by your user
+
+### 3) Minimal test run
+
+On current LoongArch setups, single-vCPU mode is the safe baseline:
+
+``` sh
+muvm --cpu-list 0 /bin/echo OK
+```
+
+If setup is correct, command output should include `OK`.
+
+### 4) Box64 test (x86 app on LoongArch host)
+
+If `box64` is installed, you can ask `muvm` to run x86 binaries through Box64:
+
+``` sh
+muvm --cpu-list 0 --emu box /path/to/box64/tests/test01
+```
+
+Example with local test binary path:
+
+``` sh
+muvm --cpu-list 0 --emu box /home/yzw/python-trans/box64-up/tests/test01
+```
+
+Typical success signals:
+
+- guest boots and command runs to completion
+- Box64 prints startup lines
+- test binary output appears (for `test01`, usually `Hello x86_64 World!`)
+
+This is the recommended smoke test for running x86 applications on LoongArch hosts (including systems using 16K host page size).
+
+### 中文版（LoongArch64）
+
+本节给出在 LoongArch64 上运行 `muvm` 的常用配置，适用于本地 `libkrun` + `libkrunfw` 场景。
+
+#### 1) 编译
+
+``` sh
+cargo build --release
+```
+
+#### 2) 运行前环境变量
+
+请使用普通用户（非 root）运行，并设置：
+
+``` sh
+export PATH=/path/to/muvm/target/release:$PATH
+export LD_LIBRARY_PATH=/path/to/libkrunfw:/path/to/libkrun/target/release:${LD_LIBRARY_PATH}
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/xdg-runtime-$(id -u)}
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+```
+
+本项目调试时使用过的本地路径示例：
+
+``` sh
+export PATH=/home/yzw/python-trans/muvm/target/release:$PATH
+export LD_LIBRARY_PATH=/home/yzw/libkrunfw:/home/yzw/libkrun/test-prefix/lib64/:${LD_LIBRARY_PATH}
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/xdg-runtime-$(id -u)}
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+```
+
+并确认：
+
+- `muvm` 与 `muvm-guest` 在 `PATH` 中
+- `passt` 已安装并在 `PATH` 中（或使用 `--passt-socket`）
+- 当前用户可访问 `/dev/kvm`
+
+#### 3) 最小可用性测试
+
+当前 LoongArch 场景建议先使用单 vCPU 测试：
+
+``` sh
+muvm --cpu-list 0 /bin/echo OK
+```
+
+若环境正确，应看到 `OK` 输出。
+
+#### 4) 搭配 Box64 运行 x86 测试
+
+安装 `box64` 后，可通过 `muvm` 调用 Box64 运行 x86 测试程序：
+
+``` sh
+muvm --cpu-list 0 --emu box /path/to/box64/tests/test01
+```
+
+本地路径示例：
+
+``` sh
+muvm --cpu-list 0 --emu box /home/yzw/python-trans/box64-up/tests/test01
+```
+
+常见成功特征：
+
+- guest 能正常启动并执行完成
+- Box64 打印初始化信息
+- 测试程序输出出现（`test01` 通常输出 `Hello x86_64 World!`）
+
+以上步骤可作为在 LoongArch 16K 页宿主上运行 4K 页 x86 应用的基础 smoke test。
+
 ## Motivation
 
 This tool is mainly intended to enable users to easily run programs designed for 4K-page systems on systems with a different page size, with [Asahi Linux](https://asahilinux.org/) being the prime example of this use case.
