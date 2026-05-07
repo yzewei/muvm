@@ -2,6 +2,7 @@ pub mod box64;
 pub mod bridge;
 pub mod fex;
 pub mod hidpipe;
+pub mod latx;
 pub mod mount;
 pub mod net;
 pub mod server;
