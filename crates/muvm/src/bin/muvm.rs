@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 use std::ffi::{c_char, CString};
-use std::io::Write;
+use std::io::{self,Read, Write};
 use std::os::fd::{IntoRawFd, OwnedFd};
 use std::path::Path;
 use std::process::ExitCode;
 use std::{env, fs};
+use std::net::TcpStream;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::thread;
 
 use anyhow::{anyhow, Context, Result};
 use krun_sys::{
@@ -67,6 +70,178 @@ fn add_ro_disk(ctx_id: u32, label: &str, path: &str) -> Result<()> {
     }
 }
 
+fn parse_ssh_display(display: &str) -> Option<u16> {
+    let rest = display
+    .strip_prefix("localhost:")
+    .or_else(|| display.strip_prefix("127.0.0.1:"))?;
+
+    let display_num = rest.split('.').next()?;
+    display_num.parse::<u16>().ok()
+}
+
+struct X11Proxy {
+    display: String,
+    socket_path: std::path::PathBuf,
+}
+
+impl Drop for X11Proxy {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.socket_path);
+    }
+}
+
+fn spawn_x11_tcp_proxy(display_num: u16) -> Result<X11Proxy> {
+    fs::create_dir_all("/tmp/.X11-unix")?;
+
+    for proxy_display in 90..100 {
+        let path = std::path::PathBuf::from(format!("/tmp/.X11-unix/X{proxy_display}"));
+
+        if path.exists() {
+            if UnixStream::connect(&path).is_ok() {
+                continue;
+            }
+            let _ = fs::remove_file(&path);
+        }
+
+        let listener = UnixListener::bind(&path)
+            .with_context(|| format!("Failed to bind X11 proxy socket {}", path.display()))?;
+
+        let tcp_port = 6000 + display_num;
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(unix) => {
+                        thread::spawn(move || {
+                            if let Err(err) = proxy_x11_connection(unix, tcp_port) {
+                                eprintln!("x11 proxy connection failed: {err}");
+                            }
+                        });
+                    }
+                    Err(err) => {
+                        eprintln!("x11 proxy accept failed: {err}");
+                    }
+                }
+            }
+        });
+
+        return Ok(X11Proxy {
+            display: format!(":{proxy_display}"),
+            socket_path: path,
+        });
+    }
+
+    Err(anyhow!("No free X11 proxy display in :90..:99"))
+}
+
+
+fn proxy_x11_connection(unix: UnixStream, tcp_port: u16) -> io::Result<()> {
+    let tcp = TcpStream::connect(("127.0.0.1", tcp_port))?;
+
+    let mut unix_r = unix.try_clone()?;
+    let mut unix_w = unix;
+    let mut tcp_r = tcp.try_clone()?;
+    let mut tcp_w = tcp;
+
+    let a = thread::spawn(move || io::copy(&mut unix_r, &mut tcp_w));
+    let b = thread::spawn(move || io::copy(&mut tcp_r, &mut unix_w));
+
+    let _ = a.join();
+    let _ = b.join();
+
+    Ok(())
+}
+
+fn setup_proxy_xauthority(original_display: u16, proxy_display: &str) -> Result<NamedTempFile> {
+    let mut file = NamedTempFile::new()
+        .context("Failed to create temporary XAUTHORITY for ssh X11 forwarding")?;
+
+    let output = std::process::Command::new("xauth")
+        .arg("list")
+        .output()
+        .context("Failed to run xauth list")?;
+
+    let stdout = String::from_utf8(output.stdout)
+        .context("xauth output is not valid UTF-8")?;
+
+    let needle = format!("unix:{original_display}");
+    let line = stdout
+        .lines()
+        .find(|line| line.contains(&needle))
+        .ok_or_else(|| anyhow!("No xauth cookie found for {needle}"))?;
+
+    let fields: Vec<_> = line.split_whitespace().collect();
+    if fields.len() < 3 {
+        return Err(anyhow!("Invalid xauth line: {line}"));
+    }
+
+    let proto = fields[1];
+    let cookie = fields[2];
+
+    let path = file.path().to_owned();
+
+    let status = std::process::Command::new("xauth")
+        .arg("-f")
+        .arg(&path)
+        .arg("add")
+        .arg(proxy_display)
+        .arg(proto)
+        .arg(cookie)
+        .status()
+        .context("Failed to run xauth add")?;
+
+    if !status.success() {
+        return Err(anyhow!("xauth add failed"));
+    }
+    
+    let output = std::process::Command::new("xauth")
+    .arg("-f")
+    .arg(&path)
+    .arg("nlist")
+    .arg(proxy_display)
+    .output()
+    .context("Failed to run xauth nlist")?;
+
+    if !output.status.success() {
+        return Err(anyhow!("xauth nlist failed"));
+    }
+
+    let mut nlist = String::from_utf8(output.stdout)
+        .context("xauth nlist output is not valid UTF-8")?;
+
+    if nlist.len() < 4 {
+        return Err(anyhow!("xauth nlist returned no entries for {proxy_display}"));
+    }
+
+    nlist.replace_range(0..4, "ffff");
+
+    let mut child = std::process::Command::new("xauth")
+        .arg("-f")
+        .arg(&path)
+        .arg("nmerge")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .context("Failed to run xauth nmerge")?;
+
+    child
+        .stdin
+        .as_mut()
+        .context("Failed to open stdin for xauth nmerge")?
+        .write_all(nlist.as_bytes())
+        .context("Failed to write wildcard xauth entry")?;
+
+    let status = child.wait().context("Failed to wait for xauth nmerge")?;
+
+    if !status.success() {
+        return Err(anyhow!("xauth wildcard merge failed"));
+    }
+
+
+    // 这里先留着 file，保证临时文件生命周期覆盖 krun_start_enter。
+    file.flush()?;
+    Ok(file)
+}
+
 fn main() -> Result<ExitCode> {
     env_logger::init();
 
@@ -105,6 +280,22 @@ fn main() -> Result<ExitCode> {
     };
 
     let mut env = prepare_env_vars(env).context("Failed to prepare environment variables")?;
+
+    
+        let mut _x11_proxy = None;
+        let mut _x11_proxy_auth = None;
+        if let Ok(display) = env::var("DISPLAY") {
+            if let Some(ssh_display_num) = parse_ssh_display(&display) {
+                let proxy = spawn_x11_tcp_proxy(ssh_display_num)?;
+                let auth = setup_proxy_xauthority(ssh_display_num, &proxy.display)?;
+
+                env::set_var("DISPLAY", &proxy.display);
+                env::set_var("XAUTHORITY", auth.path());
+                _x11_proxy = Some(proxy);
+                _x11_proxy_auth = Some((auth));
+            }
+        }
+    
 
     {
         let krun_log_level = env::var("MUVM_KRUN_LOG_LEVEL")
