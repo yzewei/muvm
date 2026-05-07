@@ -11,6 +11,7 @@ use muvm::guest::bridge::pipewire::start_pwbridge;
 use muvm::guest::bridge::x11::start_x11bridge;
 use muvm::guest::fex::setup_fex;
 use muvm::guest::hidpipe::start_hidpipe;
+use muvm::guest::latx::setup_latx;
 use muvm::guest::mount::mount_filesystems;
 use muvm::guest::net::configure_network;
 use muvm::guest::server::server_main;
@@ -95,12 +96,24 @@ fn main() -> Result<ExitCode> {
         match emulator {
             Emulator::Box => setup_box()?,
             Emulator::Fex => setup_fex()?,
+            Emulator::Latx => setup_latx()?,
         };
     } else {
         #[cfg(target_arch = "aarch64")]
         if let Err(err) = setup_fex() {
             eprintln!("Error setting up FEX in binfmt_misc: {err}");
             eprintln!("Failed to find or configure FEX, falling back to Box64");
+
+            if let Err(err) = setup_box() {
+                eprintln!("Error setting up Box64 in binfmt_misc: {err}");
+                eprintln!("No emulators were configured, x86 emulation may not work");
+            }
+        }
+
+        #[cfg(target_arch = "loongarch64")]
+        if let Err(err) = setup_latx() {
+            eprintln!("Error setting up LATX in binfmt_misc: {err}");
+            eprintln!("Failed to find or configure LATX, falling back to Box64");
 
             if let Err(err) = setup_box() {
                 eprintln!("Error setting up Box64 in binfmt_misc: {err}");
