@@ -9,10 +9,10 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
-use std::{fs, mem, ptr, thread};
+use std::{env, fs, mem, ptr, thread};
 
 use anyhow::Result;
-use log::debug;
+use log::{debug, warn};
 use nix::errno::Errno;
 use nix::fcntl::readlink;
 use nix::libc::{
@@ -387,9 +387,14 @@ impl ProtocolHandler for X11ProtocolHandler {
                 let fd = this.request_fds.remove(0);
                 let filename = readlink(format!("/proc/self/fd/{}", fd.as_raw_fd()).as_str())?;
                 let filename = filename.to_string_lossy();
-                let creds = getsockopt(&this.socket.as_fd(), PeerCredentials)?;
-                let res = Self::create_cross_vm_futex(this, fd, xid, creds.pid(), filename)?;
-                resources.push(res);
+                debug!("x11bridge: DRI3 FenceFromFD xid={xid} fd={filename}");
+                if env::var_os("MUVM_X11_DISABLE_CROSS_VM_FUTEX").is_some() {
+                    warn!("x11bridge: dropping DRI3 FenceFromFD xid={xid}");
+                } else {
+                    let creds = getsockopt(&this.socket.as_fd(), PeerCredentials)?;
+                    let res = Self::create_cross_vm_futex(this, fd, xid, creds.pid(), filename)?;
+                    resources.push(res);
+                }
             } else if buf[1] == DRI3_OPCODE_PIXMAP_FROM_BUFFERS {
                 if buf.len() < 12 {
                     return Ok(StreamSendResult::WantMore);
