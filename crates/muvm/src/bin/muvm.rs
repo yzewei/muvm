@@ -324,7 +324,7 @@ fn main() -> Result<ExitCode> {
 
     {
         let user_specified_cpu_list = !options.cpu_list.is_empty();
-        let mut cpu_list = if user_specified_cpu_list {
+        let cpu_list = if user_specified_cpu_list {
             options.cpu_list
         } else {
             get_performance_cores()
@@ -333,10 +333,6 @@ fn main() -> Result<ExitCode> {
                 })
                 .or_else(|_err| get_fallback_cores())?
         };
-
-        if cfg!(target_arch = "loongarch64") && !user_specified_cpu_list {
-            cpu_list.truncate(1);
-        }
 
         let num_vcpus = cpu_list.iter().fold(0, |acc, cpus| acc + cpus.len()) as u8;
 
